@@ -46,10 +46,18 @@ jobs:
             --argjson number "$PROJECT_NUMBER" --argjson issue "$ISSUE_NUMBER" \
             '{query:$q,variables:{owner:$owner,repo:$repo,number:$number,issue:$issue}}')")
 
-          PROJECT_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.id')
-          FIELD_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.field.id')
-          DONE_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.field.options[] | select(.name=="Done") | .id')
-          ITEM_ID=$(echo "$DATA" | jq -r --arg p "$PROJECT_ID" '.data.repository.issue.projectItems.nodes[] | select(.project.id==$p) | .id')
+          # Show GitHub's error message instead of failing silently
+          if echo "$DATA" | jq -e '.errors' > /dev/null; then
+            echo "::error::GitHub API returned an error:"
+            echo "$DATA" | jq '.errors'
+            exit 1
+          fi
+
+          PROJECT_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.id // empty')
+          FIELD_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.field.id // empty')
+          DONE_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.field.options[]? | select(.name=="Done") | .id')
+          ITEM_ID=$(echo "$DATA" | jq -r --arg p "$PROJECT_ID" '.data.repository.issue.projectItems.nodes[]? | select(.project.id==$p) | .id')
+          echo "Project: ${PROJECT_ID:-not found} | Status field: ${FIELD_ID:-not found} | Done option: ${DONE_ID:-not found} | Issue card: ${ITEM_ID:-not found}"
 
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] || [ -z "$DONE_ID" ]; then
             echo "::error::Could not find issue #$ISSUE_NUMBER on project $PROJECT_NUMBER, or the project has no 'Done' status."
