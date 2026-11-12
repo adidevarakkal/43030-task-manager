@@ -25,7 +25,7 @@ class TaskPool:
             Task("Write todo.py"),
             Task("Write unit tests"),
             Task("Write Dockerfile"),
-            Task("Write ci.yml workflow"),
+            Task("Write ci.yml and tracker.yml workflows"),
             Task("Automate project board with tracker.yml"),
         ]
         for task in tasks[:3]:
