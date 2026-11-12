@@ -1,0 +1,66 @@
+name: GitHub Projects Automation
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  move-issue-to-done:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    env:
+      # Personal access token (classic) with "repo" and "project" scopes, saved as a repository secret
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+      # Number in the project URL: github.com/users/<you>/projects/<number>, saved as a repository variable
+      PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+      OWNER: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Move linked issue to Done
+        run: |
+          set -e
+          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | head -n1 | grep -oE '[0-9]+' || true)
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "::notice::No 'Closes #N' found in the PR description, nothing to move."
+            exit 0
+          fi
+          if [ -z "$PROJECT_TOKEN" ] || [ -z "$PROJECT_NUMBER" ]; then
+            echo "::error::Add the PROJECT_TOKEN secret and PROJECT_NUMBER variable to this repository."
+            exit 1
+          fi
+
+          gql() {
+            curl -sS -X POST https://api.github.com/graphql \
+              -H "Authorization: Bearer $PROJECT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$1"
+          }
+
+          # Look up the project, its Status field, the "Done" option and the issue's card
+          QUERY='query($owner:String!,$repo:String!,$number:Int!,$issue:Int!){user(login:$owner){projectV2(number:$number){id field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name}}}}} repository(owner:$owner,name:$repo){issue(number:$issue){projectItems(first:20){nodes{id project{id}}}}}}'
+          DATA=$(gql "$(jq -n --arg q "$QUERY" --arg owner "$OWNER" --arg repo "$REPO" \
+            --argjson number "$PROJECT_NUMBER" --argjson issue "$ISSUE_NUMBER" \
+            '{query:$q,variables:{owner:$owner,repo:$repo,number:$number,issue:$issue}}')")
+
+          PROJECT_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.id')
+          FIELD_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.field.id')
+          DONE_ID=$(echo "$DATA" | jq -r '.data.user.projectV2.field.options[] | select(.name=="Done") | .id')
+          ITEM_ID=$(echo "$DATA" | jq -r --arg p "$PROJECT_ID" '.data.repository.issue.projectItems.nodes[] | select(.project.id==$p) | .id')
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] || [ -z "$DONE_ID" ]; then
+            echo "::error::Could not find issue #$ISSUE_NUMBER on project $PROJECT_NUMBER, or the project has no 'Done' status."
+            echo "$DATA"
+            exit 1
+          fi
+
+          MUTATION='mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id}}}'
+          RESULT=$(gql "$(jq -n --arg q "$MUTATION" --arg project "$PROJECT_ID" --arg item "$ITEM_ID" \
+            --arg field "$FIELD_ID" --arg option "$DONE_ID" \
+            '{query:$q,variables:{project:$project,item:$item,field:$field,option:$option}}')")
+          echo "$RESULT"
+          echo "$RESULT" | jq -e '.data.updateProjectV2ItemFieldValue.projectV2Item.id' > /dev/null
+          echo "Issue #$ISSUE_NUMBER moved to Done."
